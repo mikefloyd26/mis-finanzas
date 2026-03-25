@@ -1,5 +1,8 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from "recharts";
+import { auth, db } from "./firebase";
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
 
 const CATEGORIAS_EGRESO = ["🏠 Vivienda","🍔 Comida","🚗 Transporte","💊 Salud","🎭 Entretenimiento","👕 Ropa","📚 Educación","💡 Servicios","💳 Deudas","🎁 Otros"];
 const CATEGORIAS_INGRESO = ["💼 Salario","💰 Freelance","📈 Inversiones","🏦 Ahorros","🎁 Regalo","💸 Otros ingresos"];
@@ -29,13 +32,11 @@ const sectionTitle = {fontFamily:"'Playfair Display', serif",fontSize:17,color:"
 // ==================== UTILIDADES ====================
 function diasHasta(dia) {
   const h = new Date();
-  const hoyDia = h.getDate();
   const mesActual = h.getMonth();
   const anio = h.getFullYear();
   let target = new Date(anio, mesActual, dia);
   if (target <= h) target = new Date(anio, mesActual + 1, dia);
-  const diff = Math.ceil((target - h) / (1000*60*60*24));
-  return diff;
+  return Math.ceil((target - h) / (1000*60*60*24));
 }
 
 function etiquetaDias(dias) {
@@ -53,7 +54,7 @@ function solicitarPermisoNotificaciones() {
 
 function enviarNotificacion(titulo, body) {
   if ("Notification" in window && Notification.permission === "granted") {
-    new Notification(titulo, { body, icon: "💳", badge: "💳" });
+    new Notification(titulo, { body });
   }
 }
 
@@ -80,22 +81,38 @@ function GlobalStyles() {
 // ==================== LOGIN ====================
 function LoginScreen({ onLogin }) {
   const [modo, setModo] = useState("login");
-  const [user, setUser] = useState("");
+  const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
   const [error, setError] = useState("");
+  const [cargando, setCargando] = useState(false);
 
-  const handleSubmit = () => {
-    if (!user.trim()||!pass.trim()){setError("Completa todos los campos");return;}
-    const usuarios = JSON.parse(localStorage.getItem("finanzas_usuarios")||"{}");
-    if (modo==="registro") {
-      if(usuarios[user]){setError("Ese usuario ya existe");return;}
-      usuarios[user]=pass;
-      localStorage.setItem("finanzas_usuarios",JSON.stringify(usuarios));
-      onLogin(user);
-    } else {
-      if(!usuarios[user]||usuarios[user]!==pass){setError("Usuario o contraseña incorrectos");return;}
-      onLogin(user);
+  const traducirError = (code) => {
+    const errores = {
+      "auth/email-already-in-use": "Ese correo ya está registrado",
+      "auth/invalid-email": "Correo inválido",
+      "auth/weak-password": "La contraseña debe tener al menos 6 caracteres",
+      "auth/user-not-found": "No existe una cuenta con ese correo",
+      "auth/wrong-password": "Contraseña incorrecta",
+      "auth/invalid-credential": "Correo o contraseña incorrectos",
+      "auth/too-many-requests": "Demasiados intentos, espera un momento",
+    };
+    return errores[code] || "Error de autenticación";
+  };
+
+  const handleSubmit = async () => {
+    if (!email.trim()||!pass.trim()){setError("Completa todos los campos");return;}
+    setCargando(true);
+    setError("");
+    try {
+      if (modo==="registro") {
+        await createUserWithEmailAndPassword(auth, email, pass);
+      } else {
+        await signInWithEmailAndPassword(auth, email, pass);
+      }
+    } catch(e) {
+      setError(traducirError(e.code));
     }
+    setCargando(false);
   };
 
   return (
@@ -113,15 +130,15 @@ function LoginScreen({ onLogin }) {
               </button>
             ))}
           </div>
-          <label style={labelStyle}>Usuario</label>
-          <input style={inputStyle} placeholder="Tu nombre de usuario" value={user} onChange={e=>{setUser(e.target.value);setError("");}} />
+          <label style={labelStyle}>Correo electrónico</label>
+          <input style={inputStyle} type="email" placeholder="tu@correo.com" value={email} onChange={e=>{setEmail(e.target.value);setError("");}} />
           <label style={labelStyle}>Contraseña</label>
-          <input style={inputStyle} type="password" placeholder="Tu contraseña" value={pass} onChange={e=>{setPass(e.target.value);setError("");}}
+          <input style={inputStyle} type="password" placeholder="Mínimo 6 caracteres" value={pass} onChange={e=>{setPass(e.target.value);setError("");}}
             onKeyDown={e=>e.key==="Enter"&&handleSubmit()} />
           {error&&<p style={{color:C_EGRESO,fontSize:13,margin:"10px 0 0",textAlign:"center"}}>{error}</p>}
-          <button onClick={handleSubmit}
-            style={{...btnStyle,width:"100%",marginTop:20,padding:14,background:C_INGRESO,color:"#fff",fontWeight:700,fontSize:15}}>
-            {modo==="login"?"Entrar":"Crear cuenta"}
+          <button onClick={handleSubmit} disabled={cargando}
+            style={{...btnStyle,width:"100%",marginTop:20,padding:14,background:cargando?"#333":C_INGRESO,color:"#fff",fontWeight:700,fontSize:15,opacity:cargando?0.7:1}}>
+            {cargando?"Cargando...":(modo==="login"?"Entrar":"Crear cuenta")}
           </button>
         </div>
       </div>
@@ -155,8 +172,6 @@ function Modal({ onClose, onSave, tipo, deudas }) {
         <select style={{...inputStyle,cursor:"pointer"}} value={form.categoria} onChange={e=>setForm({...form,categoria:e.target.value})}>
           {categorias.map(c=><option key={c} style={{background:"#111"}}>{c}</option>)}
         </select>
-
-        {/* Linkear a tarjeta */}
         {tipo==="egreso"&&tarjetasActivas.length>0&&(
           <>
             <label style={labelStyle}>Cargar a tarjeta (opcional)</label>
@@ -170,7 +185,6 @@ function Modal({ onClose, onSave, tipo, deudas }) {
             </select>
           </>
         )}
-
         <div style={{display:"flex",gap:10,marginTop:22}}>
           <button onClick={onClose} style={{...btnStyle,background:"#1a1a1a",color:"#aaa",flex:1,border:"1px solid #333",padding:12}}>Cancelar</button>
           <button onClick={()=>{if(valid){onSave({...form,monto:parseFloat(form.monto),id:Date.now(),tipo,tarjetaId:form.tarjetaId||null});onClose();}}}
@@ -204,22 +218,18 @@ function ModalDeuda({ onClose, onSave, deudaEditar }) {
         <h3 style={{margin:"0 0 18px",fontFamily:"'Playfair Display', serif",fontSize:20,color:C_DEUDA}}>
           {deudaEditar?"✏️ Editar":"💳 Nueva"} {isTarjeta?"Tarjeta":"Deuda"}
         </h3>
-
         <label style={labelStyle}>Nombre</label>
         <input style={inputStyle} placeholder="Ej. Visa BBVA, Préstamo Nu..." value={form.nombre} onChange={e=>setForm({...form,nombre:e.target.value})} />
-
         <label style={labelStyle}>Tipo</label>
         <select style={{...inputStyle,cursor:"pointer"}} value={form.tipo} onChange={e=>setForm({...form,tipo:e.target.value})}>
           {TIPOS_DEUDA.map(t=><option key={t} style={{background:"#111"}}>{t}</option>)}
         </select>
-
         {isTarjeta && (
           <>
             <label style={labelStyle}>Límite de Crédito ($)</label>
             <input style={inputStyle} type="number" inputMode="decimal" placeholder="Ej. 50000" value={form.limiteCredito} onChange={e=>setForm({...form,limiteCredito:e.target.value})} />
           </>
         )}
-
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
           <div>
             <label style={labelStyle}>{isTarjeta?"Saldo Actual ($)":"Deuda Total ($)"}</label>
@@ -230,7 +240,6 @@ function ModalDeuda({ onClose, onSave, deudaEditar }) {
             <input style={inputStyle} type="number" inputMode="decimal" placeholder="0.00" value={form.pagado} onChange={e=>setForm({...form,pagado:e.target.value})} />
           </div>
         </div>
-
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
           <div>
             <label style={labelStyle}>Pago Mínimo ($)</label>
@@ -241,7 +250,6 @@ function ModalDeuda({ onClose, onSave, deudaEditar }) {
             <input style={inputStyle} type="number" inputMode="decimal" placeholder="0.0" value={form.tasaInteres} onChange={e=>setForm({...form,tasaInteres:e.target.value})} />
           </div>
         </div>
-
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
           <div>
             <label style={labelStyle}>Día de Corte</label>
@@ -252,11 +260,8 @@ function ModalDeuda({ onClose, onSave, deudaEditar }) {
             <input style={inputStyle} type="number" inputMode="numeric" placeholder="Ej. 5" min="1" max="31" value={form.diaPago} onChange={e=>setForm({...form,diaPago:e.target.value})} />
           </div>
         </div>
-
         <label style={labelStyle}>Fecha Límite de Pago</label>
         <input style={{...inputStyle,cursor:"pointer"}} type="date" value={form.fechaLimitePago||""} onChange={e=>setForm({...form,fechaLimitePago:e.target.value})} />
-
-        {/* Toggle notificaciones */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:16,padding:"12px 14px",background:"#111",borderRadius:10,border:"1px solid #222"}}>
           <div>
             <div style={{fontSize:13,color:C_TEXT,fontWeight:500}}>🔔 Notificaciones</div>
@@ -269,7 +274,6 @@ function ModalDeuda({ onClose, onSave, deudaEditar }) {
               left:form.notificaciones?25:3,transition:"left 0.2s",boxShadow:"0 1px 3px rgba(0,0,0,0.3)"}} />
           </button>
         </div>
-
         <div style={{display:"flex",gap:10,marginTop:22}}>
           <button onClick={onClose} style={{...btnStyle,background:"#1a1a1a",color:"#aaa",flex:1,border:"1px solid #333",padding:12}}>Cancelar</button>
           <button onClick={()=>{
@@ -313,7 +317,6 @@ function ModalPago({ deuda, onClose, onSave }) {
         <label style={labelStyle}>Monto del Pago ($)</label>
         <input style={inputStyle} type="number" inputMode="decimal" placeholder="0.00" value={monto} onChange={e=>setMonto(e.target.value)}
           onKeyDown={e=>e.key==="Enter"&&valid&&onSave(parseFloat(monto))} />
-
         <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap"}}>
           {deuda.pagoMinimo>0&&(
             <button onClick={()=>setMonto(String(deuda.pagoMinimo))}
@@ -328,7 +331,6 @@ function ModalPago({ deuda, onClose, onSave }) {
             </button>
           )}
         </div>
-
         <div style={{display:"flex",gap:10,marginTop:22}}>
           <button onClick={onClose} style={{...btnStyle,background:"#1a1a1a",color:"#aaa",flex:1,border:"1px solid #333",padding:12}}>Cancelar</button>
           <button onClick={()=>{if(valid){onSave(parseFloat(monto));onClose();}}}
@@ -349,7 +351,6 @@ function ModalDetalleTarjeta({ deuda, movimientos, onClose }) {
     ...cargos.map(c => ({ ...c, _tipo: "cargo", _fecha: c.id })),
     ...pagos.map(p => ({ ...p, _tipo: "pago", _fecha: p.fecha })),
   ].sort((a, b) => b._fecha - a._fecha);
-
   const isTarjeta = deuda.tipo === "💳 Tarjeta de Crédito";
   const restante = deuda.deudaTotal - deuda.pagado;
   const disponible = isTarjeta ? Math.max(0, (deuda.limiteCredito||0) - restante) : 0;
@@ -361,8 +362,6 @@ function ModalDetalleTarjeta({ deuda, movimientos, onClose }) {
           <h3 style={{margin:0,fontFamily:"'Playfair Display', serif",fontSize:18,color:C_DEUDA}}>{deuda.nombre}</h3>
           <button onClick={onClose} style={{background:"transparent",border:"none",color:C_MUTED,cursor:"pointer",fontSize:18,padding:4}}>✕</button>
         </div>
-
-        {/* Resumen visual */}
         <div style={{display:"grid",gridTemplateColumns:isTarjeta?"1fr 1fr 1fr":"1fr 1fr",gap:6,marginBottom:14}}>
           <div style={{background:"#111",borderRadius:10,padding:"10px",textAlign:"center"}}>
             <div style={{fontSize:9,color:C_MUTED,textTransform:"uppercase",letterSpacing:0.5}}>Restante</div>
@@ -379,8 +378,6 @@ function ModalDetalleTarjeta({ deuda, movimientos, onClose }) {
             <div style={{fontSize:16,fontWeight:700,color:"#aaa",marginTop:4}}>{formatMXN(isTarjeta?(deuda.limiteCredito||0):deuda.deudaTotal)}</div>
           </div>
         </div>
-
-        {/* Info de fechas */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(100px, 1fr))",gap:6,marginBottom:16}}>
           {deuda.diaCorte>0&&(
             <div style={{background:`${C_DEUDA}10`,border:`1px solid ${C_DEUDA}25`,borderRadius:10,padding:"8px 10px",textAlign:"center"}}>
@@ -405,15 +402,10 @@ function ModalDetalleTarjeta({ deuda, movimientos, onClose }) {
             </div>
           )}
         </div>
-
-        {/* Info extra */}
         <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:16}}>
           {deuda.pagoMinimo>0&&<span style={{fontSize:12,color:C_MUTED}}>Pago mín: <span style={{color:C_DEUDA,fontWeight:600}}>{formatMXN(deuda.pagoMinimo)}</span></span>}
           {deuda.tasaInteres>0&&<span style={{fontSize:12,color:C_MUTED}}>Tasa: <span style={{color:"#aaa",fontWeight:600}}>{deuda.tasaInteres}%</span></span>}
-          <span style={{fontSize:12,color:C_MUTED}}>Notif: <span style={{color:deuda.notificaciones?C_OK:C_EGRESO,fontWeight:600}}>{deuda.notificaciones?"Activas":"Apagadas"}</span></span>
         </div>
-
-        {/* Historial */}
         <h4 style={{fontSize:13,color:C_TEXT,fontWeight:600,marginBottom:10}}>📋 Movimientos vinculados ({todos.length})</h4>
         <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:280,overflowY:"auto",paddingRight:4}}>
           {todos.length===0&&<p style={{color:"#444",textAlign:"center",padding:"16px 0",fontSize:12}}>Sin movimientos registrados</p>}
@@ -435,11 +427,9 @@ function ModalDetalleTarjeta({ deuda, movimientos, onClose }) {
             </div>
           ))}
         </div>
-
-        {/* Total cargos */}
         {cargos.length>0&&(
           <div style={{marginTop:12,padding:"10px 12px",background:"#111",borderRadius:10,display:"flex",justifyContent:"space-between"}}>
-            <span style={{fontSize:12,color:C_MUTED}}>Total cargos a esta tarjeta</span>
+            <span style={{fontSize:12,color:C_MUTED}}>Total cargos</span>
             <span style={{fontSize:13,fontWeight:700,color:C_EGRESO}}>{formatMXN(cargos.reduce((s,c)=>s+c.monto,0))}</span>
           </div>
         )}
@@ -475,7 +465,6 @@ function DeudaCard({ deuda, onPago, onEdit, onDelete, onDetalle, alertas }) {
     <div style={{background:C_SURFACE,border:`1px solid ${liquidada?C_OK+"40":misAlertas.length>0?C_EGRESO+"50":C_DEUDA+"30"}`,borderRadius:14,
       padding:"clamp(12px,3vw,16px)",position:"relative",opacity:liquidada?0.6:1,cursor:"pointer"}}
       onClick={onDetalle}>
-
       {misAlertas.length>0&&!liquidada&&(
         <div style={{marginBottom:10,display:"flex",flexDirection:"column",gap:4}}>
           {misAlertas.map((a,i)=>(
@@ -487,7 +476,6 @@ function DeudaCard({ deuda, onPago, onEdit, onDelete, onDetalle, alertas }) {
           ))}
         </div>
       )}
-
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8}}>
         <div style={{minWidth:0,flex:1}}>
           <div style={{fontWeight:600,fontSize:14,color:C_TEXT,marginBottom:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{deuda.nombre}</div>
@@ -504,7 +492,6 @@ function DeudaCard({ deuda, onPago, onEdit, onDelete, onDetalle, alertas }) {
             onMouseEnter={e=>e.target.style.color=C_EGRESO} onMouseLeave={e=>e.target.style.color="#555"}>✕</button>
         </div>
       </div>
-
       <div style={{display:"grid",gridTemplateColumns:isTarjeta?"1fr 1fr 1fr":"1fr 1fr",gap:8,marginBottom:10}}>
         <div>
           <div style={{fontSize:10,color:C_MUTED,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>Restante</div>
@@ -521,12 +508,10 @@ function DeudaCard({ deuda, onPago, onEdit, onDelete, onDetalle, alertas }) {
           <div style={{fontSize:14,fontWeight:500,color:"#aaa"}}>{formatMXN(isTarjeta?limite:deuda.deudaTotal)}</div>
         </div>
       </div>
-
       <div style={{background:"#1a1a1a",borderRadius:99,height:6,overflow:"hidden",marginBottom:10}}>
         <div style={{height:"100%",width:`${Math.min(100,progreso)}%`,borderRadius:99,transition:"width 0.5s ease",
           background:liquidada?C_OK:progreso>50?`linear-gradient(90deg,${C_DEUDA},${C_OK})`:`linear-gradient(90deg,${C_EGRESO},${C_DEUDA})`}} />
       </div>
-
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}} onClick={e=>e.stopPropagation()}>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           {deuda.pagoMinimo>0&&<span style={{fontSize:11,color:C_MUTED}}>Mín: <span style={{color:C_DEUDA,fontWeight:600}}>{formatMXN(deuda.pagoMinimo)}</span></span>}
@@ -546,11 +531,12 @@ function DeudaCard({ deuda, onPago, onEdit, onDelete, onDetalle, alertas }) {
 
 // ==================== APP PRINCIPAL ====================
 function FinanzasApp({ usuario, onLogout }) {
-  const storageKey = `finanzas_data_${usuario}`;
-  const deudasKey = `finanzas_deudas_${usuario}`;
+  const uid = usuario.uid;
+  const userEmail = usuario.email;
 
-  const [todos, setTodos] = useState(()=>{try{return JSON.parse(localStorage.getItem(storageKey)||"{}");}catch{return {};}});
-  const [deudas, setDeudas] = useState(()=>{try{return JSON.parse(localStorage.getItem(deudasKey)||"[]");}catch{return [];}});
+  const [todos, setTodos] = useState({});
+  const [deudas, setDeudas] = useState([]);
+  const [cargando, setCargando] = useState(true);
   const [mes, setMes] = useState({year:hoy.getFullYear(),month:hoy.getMonth()});
   const [modal, setModal] = useState(null);
   const [modalDeuda, setModalDeuda] = useState(false);
@@ -561,8 +547,33 @@ function FinanzasApp({ usuario, onLogout }) {
   const [vista, setVista] = useState("mes");
   const [notifStatus, setNotifStatus] = useState(()=>"Notification" in window ? Notification.permission : "denied");
 
-  useEffect(()=>{localStorage.setItem(storageKey,JSON.stringify(todos));},[todos,storageKey]);
-  useEffect(()=>{localStorage.setItem(deudasKey,JSON.stringify(deudas));},[deudas,deudasKey]);
+  // ========== FIRESTORE SYNC ==========
+  // Cargar datos iniciales y escuchar cambios en tiempo real
+  useEffect(()=>{
+    const unsub1 = onSnapshot(doc(db, "usuarios", uid), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setTodos(data.movimientos || {});
+        setDeudas(data.deudas || []);
+      }
+      setCargando(false);
+    });
+    return () => unsub1();
+  },[uid]);
+
+  // Guardar movimientos en Firestore
+  const guardarEnFirestore = async (nuevosTodos, nuevasDeudas) => {
+    try {
+      await setDoc(doc(db, "usuarios", uid), {
+        movimientos: nuevosTodos,
+        deudas: nuevasDeudas,
+        email: userEmail,
+        ultimaActualizacion: Date.now(),
+      }, { merge: true });
+    } catch(e) {
+      console.error("Error guardando:", e);
+    }
+  };
 
   const clave = claveMes(mes.year,mes.month);
   const movimientos = todos[clave]||[];
@@ -579,33 +590,58 @@ function FinanzasApp({ usuario, onLogout }) {
   };
 
   const agregar = (m) => {
-    setTodos(prev=>({...prev,[clave]:[m,...(prev[clave]||[])]}));
+    const nuevosTodos = {...todos,[clave]:[m,...(todos[clave]||[])]};
+    let nuevasDeudas = deudas;
     if (m.tarjetaId && m.tipo==="egreso") {
-      setDeudas(prev=>prev.map(d=>
+      nuevasDeudas = deudas.map(d=>
         String(d.id)===String(m.tarjetaId) ? {...d, deudaTotal: d.deudaTotal + m.monto} : d
-      ));
+      );
     }
-  };
-  const eliminar = (id) => {
-    const mov = movimientos.find(m=>m.id===id);
-    if (mov && mov.tarjetaId && mov.tipo==="egreso") {
-      setDeudas(prev=>prev.map(d=>
-        String(d.id)===String(mov.tarjetaId) ? {...d, deudaTotal: Math.max(0, d.deudaTotal - mov.monto)} : d
-      ));
-    }
-    setTodos(prev=>({...prev,[clave]:(prev[clave]||[]).filter(m=>m.id!==id)}));
+    setTodos(nuevosTodos);
+    setDeudas(nuevasDeudas);
+    guardarEnFirestore(nuevosTodos, nuevasDeudas);
   };
 
-  const agregarDeuda = (d) => setDeudas(prev=>deudaEditar?prev.map(x=>x.id===d.id?d:x):[...prev,d]);
-  const eliminarDeuda = (id) => {if(confirm("¿Eliminar esta deuda?"))setDeudas(prev=>prev.filter(d=>d.id!==id));};
+  const eliminar = (id) => {
+    const mov = movimientos.find(m=>m.id===id);
+    const nuevosTodos = {...todos,[clave]:(todos[clave]||[]).filter(m=>m.id!==id)};
+    let nuevasDeudas = deudas;
+    if (mov && mov.tarjetaId && mov.tipo==="egreso") {
+      nuevasDeudas = deudas.map(d=>
+        String(d.id)===String(mov.tarjetaId) ? {...d, deudaTotal: Math.max(0, d.deudaTotal - mov.monto)} : d
+      );
+    }
+    setTodos(nuevosTodos);
+    setDeudas(nuevasDeudas);
+    guardarEnFirestore(nuevosTodos, nuevasDeudas);
+  };
+
+  const agregarDeuda = (d) => {
+    const nuevas = deudaEditar ? deudas.map(x=>x.id===d.id?d:x) : [...deudas,d];
+    setDeudas(nuevas);
+    guardarEnFirestore(todos, nuevas);
+  };
+
+  const eliminarDeuda = (id) => {
+    if(confirm("¿Eliminar esta deuda?")){
+      const nuevas = deudas.filter(d=>d.id!==id);
+      setDeudas(nuevas);
+      guardarEnFirestore(todos, nuevas);
+    }
+  };
+
   const registrarPago = (deudaId, monto) => {
     const deuda = deudas.find(d=>d.id===deudaId);
-    setDeudas(prev=>prev.map(d=>d.id===deudaId?{
+    const nuevasDeudas = deudas.map(d=>d.id===deudaId?{
       ...d,
       pagado:Math.min(d.deudaTotal, d.pagado+monto),
       historialPagos:[...(d.historialPagos||[]),{monto,fecha:Date.now()}]
-    }:d));
-    agregar({descripcion:`Pago: ${deuda?.nombre||"Deuda"}`,monto,categoria:"💳 Deudas",id:Date.now(),tipo:"egreso",tarjetaId:null});
+    }:d);
+    const nuevoMov = {descripcion:`Pago: ${deuda?.nombre||"Deuda"}`,monto,categoria:"💳 Deudas",id:Date.now(),tipo:"egreso",tarjetaId:null};
+    const nuevosTodos = {...todos,[clave]:[nuevoMov,...(todos[clave]||[])]};
+    setDeudas(nuevasDeudas);
+    setTodos(nuevosTodos);
+    guardarEnFirestore(nuevosTodos, nuevasDeudas);
   };
 
   // ALERTAS
@@ -672,6 +708,19 @@ function FinanzasApp({ usuario, onLogout }) {
   const filtrados = movimientos.filter(m=>filtro==="todos"||m.tipo===filtro);
   const alertasUrgentes = alertas.filter(a=>a.urgente);
 
+  // Pantalla de carga
+  if (cargando) {
+    return (
+      <div style={{minHeight:"100dvh",background:C_BG,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans', sans-serif"}}>
+        <GlobalStyles/>
+        <div style={{textAlign:"center"}}>
+          <h1 style={{fontFamily:"'Playfair Display', serif",fontSize:32,color:C_TEXT,margin:"0 0 10px"}}>Kash<span style={{color:C_INGRESO}}>.</span></h1>
+          <p style={{color:C_MUTED,fontSize:14}}>Cargando tus datos...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{minHeight:"100dvh",background:C_BG,color:C_TEXT,fontFamily:"'DM Sans', sans-serif",paddingBottom:60,overflowX:"hidden"}}>
       <GlobalStyles/>
@@ -681,7 +730,7 @@ function FinanzasApp({ usuario, onLogout }) {
         <div style={{maxWidth:600,margin:"0 auto"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,gap:8}}>
             <div style={{minWidth:0}}>
-              <p style={{margin:0,fontSize:11,color:C_MUTED,letterSpacing:2,textTransform:"uppercase"}}>Hola, {usuario}</p>
+              <p style={{margin:0,fontSize:11,color:C_MUTED,letterSpacing:2,textTransform:"uppercase"}}>{userEmail}</p>
               <h1 style={{margin:0,fontFamily:"'Playfair Display', serif",fontSize:"clamp(18px,5vw,22px)",color:C_TEXT,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                 Kash<span style={{color:C_INGRESO}}>.</span> <span style={{fontSize:"clamp(12px,3.5vw,15px)",fontWeight:400,color:C_MUTED}}>{MESES[mes.month]} {mes.year}</span>
               </h1>
@@ -780,12 +829,10 @@ function FinanzasApp({ usuario, onLogout }) {
                 </button>
               )}
             </div>
-
             <button onClick={()=>{setDeudaEditar(null);setModalDeuda(true);}}
               style={{...btnStyle,width:"100%",background:`${C_DEUDA}15`,border:`1.5px dashed ${C_DEUDA}60`,color:C_DEUDA,padding:14,fontSize:14,fontWeight:600,marginBottom:14}}>
               ＋ Agregar Tarjeta o Deuda
             </button>
-
             {deudas.length>0&&totalDeudaRestante>0&&(
               <div style={{background:C_SURFACE,border:`1px solid ${C_BORDER}`,borderRadius:14,padding:"clamp(10px,3vw,14px) clamp(12px,3vw,16px)",marginBottom:14}}>
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:7}}>
@@ -800,7 +847,6 @@ function FinanzasApp({ usuario, onLogout }) {
                 </div>
               </div>
             )}
-
             <div style={{display:"flex",flexDirection:"column",gap:10}}>
               {deudasActivas.length===0&&deudasLiquidadas.length===0&&(
                 <div style={{background:C_SURFACE,border:`1px dashed ${C_BORDER}`,borderRadius:16,padding:"28px 20px",textAlign:"center"}}>
@@ -816,7 +862,6 @@ function FinanzasApp({ usuario, onLogout }) {
                   onDetalle={()=>setModalDetalle(d)} />
               ))}
             </div>
-
             {deudasLiquidadas.length>0&&(
               <>
                 <h3 style={{fontSize:13,color:C_OK,margin:"20px 0 10px",fontWeight:600}}>✓ Liquidadas ({deudasLiquidadas.length})</h3>
@@ -964,8 +1009,35 @@ function FinanzasApp({ usuario, onLogout }) {
 
 // ==================== ROOT ====================
 export default function App() {
-  const [usuario, setUsuario] = useState(()=>localStorage.getItem("finanzas_sesion")||null);
-  const handleLogin = (u)=>{localStorage.setItem("finanzas_sesion",u);setUsuario(u);};
-  const handleLogout = ()=>{localStorage.removeItem("finanzas_sesion");setUsuario(null);};
-  return usuario ? <FinanzasApp usuario={usuario} onLogout={handleLogout}/> : <LoginScreen onLogin={handleLogin}/>;
+  const [usuario, setUsuario] = useState(null);
+  const [verificando, setVerificando] = useState(true);
+
+  useEffect(()=>{
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setUsuario(user);
+      setVerificando(false);
+    });
+    return () => unsub();
+  },[]);
+
+  const handleLogout = async () => {
+    await signOut(auth);
+    setUsuario(null);
+  };
+
+  if (verificando) {
+    return (
+      <div style={{minHeight:"100dvh",background:"#000",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans', sans-serif"}}>
+        <GlobalStyles/>
+        <div style={{textAlign:"center"}}>
+          <h1 style={{fontFamily:"'Playfair Display', serif",fontSize:32,color:"#fff",margin:"0 0 10px"}}>Kash<span style={{color:"#3b82f6"}}>.</span></h1>
+          <p style={{color:"#666",fontSize:14}}>Verificando sesión...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return usuario
+    ? <FinanzasApp usuario={usuario} onLogout={handleLogout}/>
+    : <LoginScreen/>;
 }
